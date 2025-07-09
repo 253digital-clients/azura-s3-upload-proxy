@@ -1,0 +1,20 @@
+{
+  "name": "s3-upload-proxy",
+  "version": "1.0.0",
+  "description": "A simple proxy server to stream audio/video uploads to S3",
+  "type": "module",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.842.0",
+    "@aws-sdk/credential-providers": "^3.840.0",
+    "express": "^4.21.2",
+    "morgan": "^1.10.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": ""
+}

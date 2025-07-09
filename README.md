@@ -1,0 +1,2 @@
+# azura-s3-upload-proxy
+A proxy server set up through Lightsail to accept streamed binary audio file data and then upload it to the approprate S3 bucket for the Azura audio message feature. This setup is designed to increase the transparency,logging and reliability of the audio message feature as opposed to using presigned urls from S3 and uploading from the browser.
