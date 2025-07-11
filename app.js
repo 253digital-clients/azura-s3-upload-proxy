@@ -1,9 +1,10 @@
 import express from 'express';
-import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
-import credentialProviders from '@aws-sdk/credential-providers';
-const { fromEnv } = credentialProviders;
+import fs from 'fs-extra';
+import multer from 'multer';
 import morgan from 'morgan';
-console.log("🧪 credentialProviders keys:", Object.keys(credentialProviders));
+import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
+import { fromEnv } from '@aws-sdk/credential-providers';
+import path from 'path';
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -14,13 +15,17 @@ console.log("🔑 AWS_REGION:", process.env.AWS_REGION);
 console.log("🔑 AWS_ACCESS_KEY_ID exists:", !!process.env.AWS_ACCESS_KEY_ID);
 console.log("🔑 AWS_SECRET_ACCESS_KEY exists:", !!process.env.AWS_SECRET_ACCESS_KEY);
 
-const s3Credentials = fromEnv();
 const s3 = new S3Client({
   region: process.env.AWS_REGION,
-  credentials:s3Credentials
+  credentials: fromEnv()
 });
 
-// CORS middleware
+// Setup chunk storage
+const CHUNK_DIR = path.join(__dirname, 'chunks');
+fs.ensureDirSync(CHUNK_DIR);
+console.log(`📁 Chunk storage directory: ${CHUNK_DIR}`);
+
+// CORS
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', 'https://app.weareazura.com');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -30,62 +35,101 @@ app.use((req, res, next) => {
 });
 
 // Middleware
-app.use(morgan('combined'));
-app.use(express.raw({
-  type: '*/*',
-  limit: '100mb',
-  verify: (req, res, buf) => {
-    req.rawBody = buf;
+app.use(morgan('dev'));
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+const storage = multer.memoryStorage();
+const upload = multer({ storage });
+
+app.post('/upload-chunk', upload.single('chunk'), async (req, res) => {
+  console.log("📥 Received POST /upload-chunk request");
+
+  const { fileId, chunkNumber, totalChunks, fileName, contentType } = req.body;
+  const chunk = req.file;
+
+  if (!fileId || !chunkNumber || !chunk || !fileName) {
+    console.error("❌ Missing required fields:", {
+      fileId,
+      chunkNumber,
+      fileName,
+      chunkExists: !!chunk
+    });
+    return res.status(400).json({ error: 'Missing fields' });
   }
-}));
 
-app.post('/upload', async (req, res) => {
-  console.log("📥 Received POST /upload request");
+  console.log(`📦 Chunk details: fileId=${fileId}, chunkNumber=${chunkNumber}, totalChunks=${totalChunks}, fileName=${fileName}`);
 
-  try {
-    const contentType = req.headers['content-type'] || 'application/octet-stream';
-    const contentLength = req.headers['content-length'] || 'unknown';
-    const ext = contentType.includes('webm') ? 'webm'
-              : contentType.includes('mp4') ? 'mp4'
-              : 'bin';
+  const chunkPath = path.join(CHUNK_DIR, `${fileId}.${chunkNumber}`);
+  console.log(`💾 Saving chunk to: ${chunkPath}`);
+  await fs.writeFile(chunkPath, chunk.buffer);
+  console.log(`✅ Chunk ${chunkNumber} saved successfully`);
 
-    const key = req.headers['x-upload-key'];
+  const uploadedChunks = (await fs.readdir(CHUNK_DIR)).filter(f => f.startsWith(fileId));
+  console.log(`📂 Uploaded chunks so far: ${uploadedChunks.length}/${totalChunks}`);
 
-    const bucket = ext === 'webm'
-      ? process.env.S3_BUCKET_WEBM
-      : ext === 'mp4'
-      ? process.env.S3_BUCKET_MP4
-      : process.env.S3_BUCKET_WEBM;
+  if (uploadedChunks.length > totalChunks) {
+    console.warn(`⚠️ Received more chunks than expected for fileId ${fileId}`);
+  }
 
-    console.log("🧾 Content-Type:", contentType);
-    console.log("📏 Content-Length:", contentLength);
-    console.log("🧩 File extension:", ext);
-    console.log("📦 S3 bucket:", bucket);
-    console.log("🗂️ S3 key:", key);
+  if (uploadedChunks.length === parseInt(totalChunks)) {
+    console.log(`🔗 All chunks received for ${fileId}. Beginning reassembly...`);
 
-    if (!bucket) {
-      console.error("❌ No bucket specified for this file type!");
-      return res.status(500).json({ error: 'No bucket configured for file type' });
+    const assembledPath = path.join(CHUNK_DIR, fileName);
+    const writeStream = fs.createWriteStream(assembledPath);
+
+    try {
+      for (let i = 1; i <= totalChunks; i++) {
+        const chunkFile = path.join(CHUNK_DIR, `${fileId}.${i}`);
+        console.log(`📥 Appending chunk: ${chunkFile}`);
+        const data = await fs.readFile(chunkFile);
+        writeStream.write(data);
+        await fs.remove(chunkFile);
+        console.log(`🗑️ Removed chunk file: ${chunkFile}`);
+      }
+      writeStream.end();
+
+      console.log(`🧩 File reassembled at: ${assembledPath}`);
+    } catch (err) {
+      console.error("❌ Error during reassembly:", err);
+      return res.status(500).json({ error: 'Failed to reassemble chunks', details: err.message });
     }
 
-    const command = new PutObjectCommand({
-      Bucket: bucket,
-      Key: key,
-      Body: req.rawBody || req.body,
-      ContentType: contentType,
-    });
+    // Upload to S3
+    try {
+      const fileBuffer = await fs.readFile(assembledPath);
+      const s3Key = `uploads/${fileName}`;
 
-    const result = await s3.send(command);
+      console.log(`📤 Uploading to S3...`);
+      console.log(`🪣 Bucket: ${process.env.S3_BUCKET}`);
+      console.log(`📁 S3 Key: ${s3Key}`);
+      console.log(`📨 Content-Type: ${contentType || 'application/octet-stream'}`);
 
-    console.log("✅ Upload to S3 succeeded");
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.status(200).json({ message: 'Upload successful', key, s3Result: result });
-  } catch (err) {
-    console.error("❌ Upload failed:", err);
-    res.status(500).json({ error: 'Upload failed', details: err.message });
+      const command = new PutObjectCommand({
+        Bucket: process.env.S3_BUCKET,
+        Key: s3Key,
+        Body: fileBuffer,
+        ContentType: contentType || 'application/octet-stream'
+      });
+
+      await s3.send(command);
+      console.log(`✅ Successfully uploaded ${fileName} to S3`);
+
+      await fs.remove(assembledPath);
+      console.log(`🧹 Deleted local reassembled file: ${assembledPath}`);
+
+      res.status(200).json({ message: 'Upload complete', s3Key });
+      console.log(`🎉 Upload process completed for ${fileName}, S3 Key: ${s3Key}`);
+    } catch (err) {
+      console.error("❌ Failed to upload to S3:", err);
+      res.status(500).json({ error: 'S3 upload failed', details: err.message });
+    }
+  } else {
+    console.log(`📨 Awaiting more chunks for fileId ${fileId}`);
+    res.status(200).json({ message: 'Chunk received' });
   }
 });
 
 app.listen(port, '0.0.0.0', () => {
-  console.log(`Upload proxy running on port ${port}`);
+  console.log(`🚀 Chunked upload server running on port ${port}`);
 });
