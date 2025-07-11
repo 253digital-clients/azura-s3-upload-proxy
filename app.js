@@ -2,6 +2,8 @@ import express from 'express';
 import fs from 'fs-extra';
 import multer from 'multer';
 import morgan from 'morgan';
+import dotenv from 'dotenv';
+dotenv.config();
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 import { fromEnv } from '@aws-sdk/credential-providers';
 import path from 'path';
