@@ -81,27 +81,23 @@ app.post('/upload-chunk', upload.single('chunk'), async (req, res) => {
 
   if (uploadedChunks.length === parseInt(totalChunks)) {
     console.log(`🔗 All chunks received for ${fileId}. Beginning reassembly...`);
-
+    
     const assembledPath = path.join(CHUNK_DIR, fileName);
-    const writeStream = fs.createWriteStream(assembledPath);
+    fs.ensureFileSync(assembledPath); // make sure file exists/created fresh
 
     try {
       for (let i = 1; i <= totalChunks; i++) {
-        const chunkFile = path.join(CHUNK_DIR, `${fileId}.${i}`);
-        console.log(`📥 Appending chunk: ${chunkFile}`);
-        const data = await fs.readFile(chunkFile);
-        writeStream.write(data);
-        await fs.remove(chunkFile);
-        console.log(`🗑️ Removed chunk file: ${chunkFile}`);
-      }
-      writeStream.end();
-
-      console.log(`🧩 File reassembled at: ${assembledPath}`);
-    } catch (err) {
-      console.error("❌ Error during reassembly:", err);
-      return res.status(500).json({ error: 'Failed to reassemble chunks', details: err.message });
+      const chunkFile = path.join(CHUNK_DIR, `${fileId}.${i}`);
+      const data = await fs.readFile(chunkFile);
+      fs.appendFileSync(assembledPath, data);
+      await fs.remove(chunkFile);
+      console.log(`🧩 Appended and removed: ${chunkFile}`);
     }
-
+    console.log(`🧩 File reassembled at: ${assembledPath}`);
+  } catch (err) {
+    console.error("❌ Error during reassembly:", err);
+    return res.status(500).json({ error: 'Failed to reassemble chunks', details: err.message });
+  }
     // Upload to S3
     try {
       const fileBuffer = await fs.readFile(assembledPath);
